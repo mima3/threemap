@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+	<html lang="en">
+    <head>
+        <title>Railroad 3D</title>
+        <meta charset="UTF-8">
+        <link rel="stylesheet" href="js/jquery/jquery-ui.min.css" type="text/css" />
+        <link rel="stylesheet" href="base.css" type="text/css" />
+        <script src="js/jquery/jquery-1.11.2.min.js"></script>
+        <script src="js/jquery/jquery-ui-1.10.4.min.js"></script>
+        <script src="js/blockui/jquery.blockUI.js"></script>
+        <script src="js/d3/d3.js"></script>
+        <script src="js/three.js/three.js"></script>
+        <script src="js/d3-threeD/lib/d3-threeD.js"></script>
+        <script src="js/three.js/controls/TrackballControls.js"></script>
+        <script type="text/javascript" src="js/async/lib/async.js"></script>
+    </head>
+    <body>
+       <div id="contents">
+         <h1>RailRoad 3D</h1>
+         <p>左クリックによるドラッグ：カメラの回転</p>
+         <p>右クリックによるドラッグ：カメラの上下左右移動</p>
+         <p>ホイール：カメラを前後移動</p>
+         <div id="map" style="margin:0 auto 0 auto; width: 600px; height: 600px"></div>
+         <p>このデータは下記より作成されています。</p>
+         <p><b>「国土数値情報」</b></p>
+         <p><a href="http://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N03.html">国土数値情報　行政区域データ</a></p>
+         <p><a href="http://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N02-v2_2.html">国土数値情報　鉄道データ</a></p>
+         <p><b>地理院地図</b></p>
+         <p><a href="http://portal.cyberjapan.jp/help/development/api.html">標高API</a></p>
+
+       </div>
+<script>
+/**
+ * ローディング画面の表示
+ */
+function showBlockUI() {
+  $.blockUI(
+    { 
+      message: '<img src="img/loading.gif" />Loading...',
+      css: { 
+        border: 'none', 
+        padding: '15px', 
+        backgroundColor: '#444', 
+        '-webkit-border-radius': '10px', 
+        '-moz-border-radius': '10px', 
+        opacity: .5, 
+        color: '#fff' 
+      } 
+    }
+  );
+}
+
+showBlockUI();
+
+/**
+ * 国土数値情報の行政区域と鉄道路線情報を読み込む
+ */
+async.parallel([
+  function (callback) {
+    d3.json("http://needtec.sakura.ne.jp/kokudo/json/get_administrative_district_by_geometry?swlat=35.45&swlng=139.4&nelat=35.7&nelng=139.81", function(json) {
+        callback(null, json);
+    });
+  },
+  function (callback) {
+    d3.json(encodeURI('http://needtec.sakura.ne.jp/kokudo/json/get_railroad_section?operationCompany=東京急行電鉄&embed_elevation=True'), function(json) {
+        callback(null, json);
+    });
+  }
+], function(err, results) {
+  console.log(err, results);
+  $.unblockUI();
+  if (err) {
+    return;
+  }
+  var container;
+  var camera, scene, renderer;
+  var mesh;
+  initScene();
+
+  function initScene() {
+    container = $('#map');
+
+    //シーンの追加
+    scene = new THREE.Scene();
+
+    //カメラの設定
+    camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 10000);
+    camera.position.set(-6.005123939520757, -6.754277108005312, 3.1756149676051133);
+    var target = new THREE.Vector3();
+    target.x = -7.162140160089945;
+    target.y = 0.42803104270646924;
+    target.z = -2.063747120298727;
+    //camera.lookAt(target); // TrackballControls使用中は効かない
+
+    scene.add(camera);
+
+    //ライティングの設定
+    var light = new THREE.DirectionalLight(0xffffff, 2);
+    light.position.set(-10, -20, 30).normalize();
+    scene.add(light);
+
+    light2 = new THREE.AmbientLight(0x333333);               
+    scene.add(light2);  
+
+    var projection = d3.geo.equirectangular()
+       .scale(900)
+       .translate([-2200, 560]);
+
+    //上下が反転しているのでムリくり合わせる
+    var reverseProjection = function(x, y) {
+      pt = projection(x, y);
+      pt[1] *= -1;
+      return pt;
+    };
+
+    //geoJSONのデータをパスに変換する関数を作成
+    var path = d3.geo.path().projection(reverseProjection);
+
+
+    createAdministrativeDistrictMesh(results[0].features);
+    createRailroad(results[1].features);
+
+    function createAdministrativeDistrictMesh(geodata) {
+      //geoJSON→svg path→three.js mesh変換    
+      var countries = [];
+      for (i = 0 ; i < geodata.length ; i++) {
+        var geoFeature = geodata[i];
+        var properties = geoFeature.properties;
+        var feature = path(geoFeature);
+
+        //svgパスをthree.jsのmeshに変換
+        var gmesh = transformSVGPathExposed(feature);
+        //console.log(properties, gmesh);
+        countries.push({"data": properties, "mesh": gmesh});
+      }
+
+      //mesh追加
+      for (i = 0 ; i < countries.length ; i++) {
+      
+          var material = new THREE.MeshLambertMaterial({color:0x888888});
+          
+          var shape3d = countries[i].mesh.extrude({
+              amount: 0,
+              bevelEnabled: false
+          });
+
+          var toAdd = new THREE.Mesh(shape3d, material);
+          //toAdd.rotation.x = 60;
+          scene.add(toAdd);
+      }
+    }
+
+    function expendElevation(features) {
+      for (var i = 0; i < features.length; ++i) {
+        var feature = features[i];
+        var end_elevation = feature.properties.end_elevation;
+        var start_elevation = feature.properties.start_elevation;
+        var per_elevation = (end_elevation - start_elevation) / feature.geometry.coordinates.length;
+        for (var j = 0; j < feature.geometry.coordinates.length; ++j) {
+            feature.geometry.coordinates[j].push(start_elevation + (j * per_elevation));
+        }
+      }
+      return features;
+    }
+    function compressionLine(features) {
+      var before = features.length;
+      for (var i = 0; i < features.length; ++i) {
+        for (var j = features.length -1; i < j; --j) {
+          var f1Start = features[i].geometry.coordinates[0];
+          var f1End = features[i].geometry.coordinates[features[i].geometry.coordinates.length-1];
+
+          var f2Start = features[j].geometry.coordinates[0];
+          var f2End = features[j].geometry.coordinates[features[j].geometry.coordinates.length-1];
+
+          // f1の開始点がf2の終端と一致する場合、f1の前にf2がある
+          if (f1Start[0] == f2End[0] && f1Start[1] == f2End[1]) {
+            features[i].geometry.coordinates = features[j].geometry.coordinates.concat(features[i].geometry.coordinates);
+            features.splice(j, 1);
+            break;
+          }
+          // f1の終了点がf2の開始点と一致する場合、f1の後にf2がある
+          if (f1End[0] == f2Start[0] && f1End[1] == f2Start[1]) {
+            features[i].geometry.coordinates = features[i].geometry.coordinates.concat(features[j].geometry.coordinates);
+            features.splice(j, 1);
+            break;
+          }
+        }
+      }
+      if (features.length == before) {
+        return features;
+      }
+      return compressionLine(features);
+    }
+
+    function createRailroad(geodata) {
+      console.log(geodata.length);
+      geodata = expendElevation(geodata);
+      geodata = compressionLine(geodata);
+      console.log(geodata.length);
+      var scaleElevation = 100;
+      for (var i = 0 ; i < geodata.length ; i++) {
+        var lineList = [];
+        var geoFeature = geodata[i];
+        var baseX;
+        var baseY;
+        for (var j = 0; j < geoFeature.geometry.coordinates.length; ++j) {
+          var pt = reverseProjection([
+            geoFeature.geometry.coordinates[j][0],
+            geoFeature.geometry.coordinates[j][1]
+          ]);
+          if (j ==0) {
+            baseX = pt[0];
+            baseY = pt[1];
+            lineList.push(new THREE.Vector3(0, 0, geoFeature.geometry.coordinates[j][2] / scaleElevation));
+          } else {
+            lineList.push(new THREE.Vector3(pt[0] - baseX, pt[1] - baseY, geoFeature.geometry.coordinates[j][2] /scaleElevation));
+          }
+        }
+        var spline = new THREE.SplineCurve3(lineList);
+        var tubeGeo = new THREE.TubeGeometry(spline, 32, 0.03, 8, false);
+        var mesh = new THREE.Mesh(
+          tubeGeo,
+          new THREE.MeshLambertMaterial( { 
+            color: 0xff0000,
+            transparent: true,
+            opacity: 0.9
+          })
+        );
+        mesh.position.set(baseX, baseY, 0.1);
+        scene.add(mesh);
+      }
+    }
+
+    //レンダリング
+    renderer = new THREE.WebGLRenderer();
+    renderer.setSize(container.width(), container.height());
+
+    container.append(renderer.domElement);
+    renderer.render(scene, camera);
+
+    // ドラッグによる視点移動
+    var controls = new THREE.TrackballControls(camera, renderer.domElement);
+    controls.target = target;
+
+    animate();
+
+    function animate() {
+        requestAnimationFrame(animate); 
+        renderer.render(scene, camera); 
+        controls.update();
+    }  
+
+  }
+});
+</script>
+    </body>
+</html>
